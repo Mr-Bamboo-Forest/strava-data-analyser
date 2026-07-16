@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strava Data Analyser</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body class="theme-light">
+  <div class="app-container">
+    <aside class="sidebar" id="sidebar" aria-label="Main Navigation">
+      <div class="brand">
+
+        <span class="brand-name">Strava Data Analyser</span>
+      </div>
+      <nav class="nav-list" role="navigation">
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="performance">Performance</button>
+        <button class="nav-item" data-view="activities">Activities</button>
+        <button class="nav-item" data-view="compare">Compare Runs</button>
+        <button class="nav-item" data-view="records">Records</button>
+        <button class="nav-item" data-view="training">Training Load</button>
+        <button class="nav-item" data-view="routes">Routes</button>
+        <button class="nav-item" data-view="settings">Settings</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="version-label">Strava Data Analyser</span>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="top-bar">
+        <div class="header-left">
+          <h1 class="page-title" id="page-title">Overview</h1>
+          <span class="current-date-range" id="current-date-range">Last 30 Days</span>
+        </div>
+        <div class="header-right">
+          <label for="date-range-select" class="sr-only">Select Date Range</label>
+          <select id="date-range-select" class="control-select">
+            <option value="30">Last 30 Days</option>
+            <option value="90">Last 90 Days</option>
+            <option value="365">Last 365 Days</option>
+            <option value="all">All Time</option>
+          </select>
+          <input type="file" id="import-file" accept=".gpx,.json" class="sr-only" webkitdirectory directory multiple>
+          <button id="btn-import" class="btn btn-secondary">Import GPX Folder</button>
+          <button id="btn-export" class="btn btn-outline">Export</button>
+        </div>
+      </header>
+
+      <div id="views-container" class="views-container">
+        
+        <section id="view-overview" class="view-section active">
+          <div class="coaching-panel">
+            <div class="coaching-header">
+              <h2>Coaching Summary</h2>
+              <span class="badge" id="overview-status-badge">--</span>
+            </div>
+            <div class="coaching-grid">
+              <div class="coach-metric">
+                <span class="coach-label">Est. Half Marathon</span>
+                <strong class="coach-val tabular" id="coach-hm-pred">--</strong>
+              </div>
+              <div class="coach-metric">
+                <span class="coach-label">Fitness Trend</span>
+                <strong class="coach-val" id="coach-fitness-trend">--</strong>
+              </div>
+              <div class="coach-metric">
+                <span class="coach-label">Recovery Status</span>
+                <strong class="coach-val" id="coach-recovery-status">--</strong>
+              </div>
+              <div class="coach-metric highlight-box">
+                <span class="coach-label">Recommended Next Run</span>
+                <strong class="coach-val" id="coach-next-run">--</strong>
+              </div>
+            </div>
+            <div class="observations-list" id="overview-observations"></div>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat-card">
+              <span class="stat-label">Distance This Week</span>
+              <span class="stat-value tabular" id="stat-week-dist">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Runs This Week</span>
+              <span class="stat-value tabular" id="stat-week-runs">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Running Time</span>
+              <span class="stat-value tabular" id="stat-week-time">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Elevation Gain</span>
+              <span class="stat-value tabular" id="stat-week-elev">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Current Streak</span>
+              <span class="stat-value tabular" id="stat-streak">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Average Pace</span>
+              <span class="stat-value tabular" id="stat-avg-pace">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Longest Run</span>
+              <span class="stat-value tabular" id="stat-longest-run">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Weekly Goal Progress</span>
+              <div class="progress-bar-container">
+                <div class="progress-bar" id="stat-goal-bar" style="width: 0%;"></div>
+              </div>
+              <span class="stat-subtext tabular" id="stat-goal-text">--</span>
+            </div>
+          </div>
+
+          <div class="charts-row">
+            <div class="chart-card">
+              <h3>Weekly Distance</h3>
+              <div class="chart-wrapper"><canvas id="chart-overview-weekly"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <h3>Pace Trend</h3>
+              <div class="chart-wrapper"><canvas id="chart-overview-pace"></canvas></div>
+            </div>
+          </div>
+
+          <div class="split-row">
+            <div class="panel-card">
+              <h3>Recent Activities</h3>
+              <ul class="activity-list" id="overview-recent-list"></ul>
+            </div>
+            <div class="panel-card">
+              <h3>Consistency Calendar (Last 12 Weeks)</h3>
+              <div class="heatmap-grid" id="overview-heatmap"></div>
+              <div class="pr-summary-box">
+                <h4>Personal Records Summary</h4>
+                <div id="overview-pr-summary" class="pr-compact-grid"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-performance" class="view-section">
+          <div class="panel-card">
+            <h2>Race Predictions (Riegel Formula)</h2>
+            <p class="section-desc">Calculated using your strongest recent sub-maximal or maximal effort with a configurable fatigue exponent.</p>
+            <div class="race-preds-grid" id="perf-race-preds"></div>
+          </div>
+
+          <div class="charts-row">
+            <div class="chart-card">
+              <div class="card-header-with-desc">
+                <h3>Pace Trend Over Time</h3>
+                <span class="info-tooltip" title="Tracks moving pace normalized for elevation and distance across all logged runs.">ⓘ</span>
+              </div>
+              <div class="chart-wrapper"><canvas id="chart-perf-pace"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <div class="card-header-with-desc">
+                <h3>Pace vs. Distance</h3>
+                <span class="info-tooltip" title="Shows how pace changes as distance increases across your runs.">ⓘ</span>
+              </div>
+              <div class="chart-wrapper"><canvas id="chart-perf-dist-pace"></canvas></div>
+            </div>
+          </div>
+
+          <div class="charts-row">
+            <div class="chart-card">
+              <div class="card-header-with-desc">
+                <h3>Rolling Distance</h3>
+                <span class="info-tooltip" title="Tracks recent training volume to keep your build structured and sustainable.">ⓘ</span>
+              </div>
+              <div class="chart-wrapper"><canvas id="chart-perf-rolling"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <div class="card-header-with-desc">
+                <h3>Performance Score</h3>
+                <span class="info-tooltip" title="Tracks your pace-based performance score over time.">ⓘ</span>
+              </div>
+              <div class="chart-wrapper"><canvas id="chart-perf-score"></canvas></div>
+            </div>
+          </div>
+
+
+        </section>
+
+        <section id="view-activities" class="view-section">
+          <div class="filter-bar">
+            <input type="text" id="filter-search" class="control-input" placeholder="Search by name...">
+            <select id="filter-type" class="control-select">
+              <option value="all">All Types</option>
+              <option value="Long Run">Long Run</option>
+              <option value="Interval">Interval</option>
+              <option value="Tempo">Tempo</option>
+              <option value="Recovery">Recovery</option>
+              <option value="Race">Race</option>
+            </select>
+            <input type="number" id="filter-min-dist" class="control-input small" placeholder="Min km" step="0.5">
+            <input type="number" id="filter-max-dist" class="control-input small" placeholder="Max km" step="0.5">
+            <input type="text" id="filter-max-pace" class="control-input small" placeholder="Max Pace (e.g. 5:30)">
+            <label class="checkbox-label"><input type="checkbox" id="filter-pr"> Only PRs</label>
+            <label class="checkbox-label"><input type="checkbox" id="filter-long"> Long Runs</label>
+            <button id="btn-reset-filters" class="btn btn-outline">Reset</button>
+          </div>
+
+          <div class="table-container">
+            <table class="data-table" id="activities-table">
+              <thead>
+                <tr>
+                  <th data-sort="date">Date ↕</th>
+                  <th data-sort="name">Run Name ↕</th>
+                  <th data-sort="distance">Distance ↕</th>
+                  <th data-sort="elapsed_time">Elapsed ↕</th>
+                  <th data-sort="moving_time">Moving ↕</th>
+                  <th data-sort="average_pace">Pace ↕</th>
+                  <th data-sort="total_elevation_gain">Elev ↕</th>
+                  <th data-sort="average_cadence">Cadence ↕</th>
+                  <th data-sort="score">Score ↕</th>
+                </tr>
+              </thead>
+              <tbody id="activities-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="view-compare" class="view-section">
+          <div class="compare-selectors">
+            <div class="selector-box">
+              <label for="compare-select-1">Select Activity A:</label>
+              <select id="compare-select-1" class="control-select full-width"></select>
+            </div>
+            <div class="selector-box">
+              <label for="compare-select-2">Select Activity B:</label>
+              <select id="compare-select-2" class="control-select full-width"></select>
+            </div>
+          </div>
+
+          <div id="compare-results" class="compare-results hidden">
+            <div class="panel-card">
+              <h3>Comparative Analysis</h3>
+              <ul id="compare-summary-list" class="observations-list"></ul>
+            </div>
+            <div class="table-container">
+              <table class="data-table compare-table">
+                <thead>
+                  <tr>
+                    <th>Metric</th>
+                    <th id="comp-head-1">Run A</th>
+                    <th id="comp-head-2">Run B</th>
+                    <th>Difference</th>
+                  </tr>
+                </thead>
+                <tbody id="compare-metrics-body"></tbody>
+              </table>
+            </div>
+            <div class="charts-row">
+              <div class="chart-card">
+                <h3>Overlaid Pace (min/km by Split)</h3>
+                <div class="chart-wrapper"><canvas id="chart-compare-pace"></canvas></div>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        <section id="view-records" class="view-section">
+          <div class="records-grid" id="records-grid-container"></div>
+        </section>
+
+        <section id="view-training" class="view-section">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <span class="stat-label">7-Day Load</span>
+              <span class="stat-value tabular" id="load-7d">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">28-Day Load</span>
+              <span class="stat-value tabular" id="load-28d">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Acute:Chronic Ratio</span>
+              <span class="stat-value tabular" id="load-acwr">1.00</span>
+              <span class="stat-subtext" id="load-acwr-label">Balanced</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Training Monotony</span>
+              <span class="stat-value tabular" id="load-monotony">1.10</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Training Strain</span>
+              <span class="stat-value tabular" id="load-strain">45.2</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Rest Days (Last 14d)</span>
+              <span class="stat-value tabular" id="load-rest-days">4</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Avg Load</span>
+              <span class="stat-value tabular" id="load-avg-int">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-label">Weekly Change</span>
+              <span class="stat-value tabular" id="load-weekly-change">+0.0%</span>
+            </div>
+          </div>
+
+          <div class="panel-card warning-panel" id="load-warning-panel">
+            <h4>Workload Indicator Notice</h4>
+            <p id="load-warning-text">Training volume is balanced. This is a workload indicator, not a medical assessment.</p>
+          </div>
+
+          <div class="charts-row">
+            <div class="chart-card">
+              <h3>Acute vs. Chronic Workload Trend</h3>
+              <div class="chart-wrapper"><canvas id="chart-load-acwr"></canvas></div>
+            </div>
+            <div class="chart-card">
+              <h3>Recommended Next Run</h3>
+              <div id="load-next-run-panel" class="next-run-box">
+                <h4 id="load-rec-title">Recovery Base Run</h4>
+                <p id="load-rec-desc">Based on your acute workload, a low-intensity recovery run is optimal today to promote cardiovascular recovery without increasing orthopedic strain.</p>
+                <div class="rec-specs">
+                  <div><strong>Target Distance:</strong> <span id="load-rec-dist">6.0 km</span></div>
+                  <div><strong>Target Pace:</strong> <span id="load-rec-pace">5:30 - 5:45 /km</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-routes" class="view-section">
+          <div class="panel-card">
+            <h2>Frequent Routes & Corridors</h2>
+            <p class="section-desc">Clusters of activities grouped by matching distance and title patterns.</p>
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Route Name / Type</th>
+                    <th>Runs Count</th>
+                    <th>Avg Distance</th>
+                    <th>Avg Pace</th>
+                    <th>Avg Elevation</th>
+                    <th>Fastest Pace</th>
+                  </tr>
+                </thead>
+                <tbody id="routes-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-settings" class="view-section">
+          <div class="settings-form">
+            <div class="panel-card">
+              <h3>User Goals & Thresholds</h3>
+              <div class="form-group">
+                <label for="set-goal-dist">Weekly Distance Goal (km):</label>
+                <input type="number" id="set-goal-dist" class="control-input" value="40" step="1">
+              </div>
+              <div class="form-group">
+                <label for="set-long-threshold">Long Run Distance Threshold (km):</label>
+                <input type="number" id="set-long-threshold" class="control-input" value="15" step="1">
+              </div>
+              <div class="form-group">
+                <label for="set-riegel-exp">Riegel Prediction Exponent:</label>
+                <input type="number" id="set-riegel-exp" class="control-input" value="1.06" step="0.01" min="1.00" max="1.15">
+                <small>Standard fatigue exponent is 1.06. Increase if you slow down significantly at marathon distances.</small>
+              </div>
+              <div class="form-group">
+                <label for="set-collapse-sens">Pace-Collapse Sensitivity (% slowdown threshold):</label>
+                <input type="number" id="set-collapse-sens" class="control-input" value="5" step="1" min="1" max="20">
+              </div>
+            </div>
+
+            <div class="panel-card">
+              <h3>GPX Folder Import</h3>
+              <p class="section-desc">Choose a folder exported from Strava that contains .gpx activity files. Each file becomes one activity in the dashboard.</p>
+              <p class="save-feedback">Use the Import GPX Folder button in the header to select your folder.</p>
+            </div>
+
+            <div class="panel-card">
+              <h3>Visual Preferences & Formatting</h3>
+              <div class="form-group">
+                <label for="set-units">Preferred Units:</label>
+                <select id="set-units" class="control-select">
+                  <option value="metric">Metric (km, m, min/km)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="set-theme">Theme:</label>
+                <select id="set-theme" class="control-select">
+                  <option value="theme-light">Light Athletic</option>
+                  <option value="theme-dark">Charcoal Dark Mode</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="set-accent">Accent Colour:</label>
+                <select id="set-accent" class="control-select">
+                  <option value="#c85a32">Burnt Orange (Default)</option>
+                  <option value="#a83232">Muted Rust Red</option>
+                  <option value="#2b6e4f">Deep Athletic Green</option>
+                  <option value="#325bc8">Performance Slate Blue</option>
+                </select>
+              </div>
+              <button id="btn-save-settings" class="btn btn-primary">Save Preferences</button>
+              <span id="settings-save-msg" class="save-feedback"></span>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <div id="activity-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title" class="modal-title">Activity Details</h3>
+        <button id="btn-close-modal" class="btn-close" aria-label="Close modal">×</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
