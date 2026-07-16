@@ -1,1 +1,1 @@
-# strava-data-analyser-
+# strava-data-analyser
