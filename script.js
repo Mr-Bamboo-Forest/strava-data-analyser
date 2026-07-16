@@ -326,7 +326,7 @@ const Analytics = {
    */
   summarizeOverview: (activities) => {
     if (!activities || activities.length === 0) {
-      return { fitnessTrend: '--', recoveryStatus: '--', recommendedNextRun: '--', status: '--' };
+      return { fitnessTrend: '--', recoveryStatus: '--', recommendedNextRun: '--', status: '--', explanation: [], warnings: [] };
     }
 
     const sorted = [...activities].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -362,20 +362,38 @@ const Analytics = {
     const paceLabel = recentPace > 0 ? Helpers.formatPace(recentPace + 20) : Helpers.formatPace(300);
 
     let recommendedNextRun = `${targetDistance} km steady endurance run • ${paceLabel}`;
-    if (recoveryStatus === 'Recovery needed') {
-      recommendedNextRun = `${targetDistance} km easy recovery run • ${paceLabel}`;
-    } else if (Number(load.acwr) > 1.2) {
-      recommendedNextRun = `${targetDistance} km easy base run • ${paceLabel}`;
+    let status = 'Balanced';
+    let explanation = [];
+    let warnings = [];
+
+    if (window.WorkoutRecommendationEngine && typeof window.WorkoutRecommendationEngine.recommend === 'function') {
+      const recommendation = window.WorkoutRecommendationEngine.recommend(activities, AppState?.settings || {});
+      if (recommendation) {
+        fitnessTrend = recommendation.fitnessTrend || fitnessTrend;
+        recoveryStatus = recommendation.recoveryStatus || recoveryStatus;
+        recommendedNextRun = recommendation.recommendedNextRun || recommendedNextRun;
+        status = recommendation.status || status;
+        explanation = recommendation.explanation || [];
+        warnings = recommendation.warnings || [];
+      }
     }
 
-    let status = 'Balanced';
+    if (recoveryStatus === 'Recovery needed' && !explanation.length) {
+      recommendedNextRun = `${targetDistance} km easy recovery run • ${paceLabel}`;
+      explanation = ['ACWR is elevated and the current load looks too sharp for another hard session.'];
+      warnings = ['Your training load has increased sharply this week.'];
+    } else if (Number(load.acwr) > 1.2 && !explanation.length) {
+      recommendedNextRun = `${targetDistance} km easy base run • ${paceLabel}`;
+      explanation = ['Fatigue is creeping up, so the plan favours a lower-stress aerobic session.'];
+    }
+
     if (recoveryStatus === 'Recovery needed') {
       status = 'Recovering';
     } else if (fitnessTrend.includes('Improving')) {
       status = 'Productive';
     }
 
-    return { fitnessTrend, recoveryStatus, recommendedNextRun, status };
+    return { fitnessTrend, recoveryStatus, recommendedNextRun, status, explanation, warnings };
   },
 
   predictRaceTimes: (activities, exponent = 1.06) => {
@@ -418,7 +436,7 @@ const Analytics = {
    * Training Load & Acute-to-Chronic Workload Ratio (ACWR)
    */
   calculateTrainingLoad: (activities) => {
-    const now = new Date("2026-07-16T00:00:00Z").getTime(); // Fixed current reference date
+    const now = new Date().getTime(); // Fixed current reference date
     const dayMs = 86400000;
 
     let dist7d = 0;
@@ -520,7 +538,7 @@ const Render = {
   },
 
   filterActivities: () => {
-    const now = new Date("2026-07-16T00:00:00Z").getTime();
+    const now = new Date().getTime();
     const dayMs = 86400000;
 
     AppState.filteredActivities = AppState.activities.filter(a => {
@@ -565,7 +583,7 @@ const Render = {
 
   overview: () => {
     const acts = AppState.filteredActivities;
-    const weekActs = acts.filter(a => (new Date("2026-07-16T00:00:00Z") - new Date(a.date)) / 86400000 <= 7);
+    const weekActs = acts.filter(a => (new Date() - new Date(a.date)) / 86400000 <= 7);
     const weekDist = weekActs.reduce((sum, a) => sum + a.distance, 0);
     const weekTime = weekActs.reduce((sum, a) => sum + a.moving_time, 0);
     const weekElev = weekActs.reduce((sum, a) => sum + (a.total_elevation_gain || 0), 0);
@@ -602,10 +620,25 @@ const Render = {
 
     const obsContainer = document.getElementById('overview-observations');
     obsContainer.innerHTML = '';
-    const emptyState = document.createElement('div');
-    emptyState.className = 'obs-item';
-    emptyState.textContent = hasData ? `Weekly volume is currently at ${weekDist.toFixed(1)} km toward your ${goal} km target.` : '--';
-    obsContainer.appendChild(emptyState);
+    if (!hasData) {
+      const emptyState = document.createElement('div');
+      emptyState.className = 'obs-item';
+      emptyState.textContent = '--';
+      obsContainer.appendChild(emptyState);
+    } else {
+      const observations = [
+        `Weekly volume is currently at ${weekDist.toFixed(1)} km toward your ${goal} km target.`,
+        ...(overviewSummary.explanation || []),
+        ...(overviewSummary.warnings || []).map(warning => `⚠ ${warning}`)
+      ];
+
+      observations.slice(0, 5).forEach(item => {
+        const obsItem = document.createElement('div');
+        obsItem.className = 'obs-item';
+        obsItem.textContent = item;
+        obsContainer.appendChild(obsItem);
+      });
+    }
 
     const list = document.getElementById('overview-recent-list');
     list.innerHTML = '';
