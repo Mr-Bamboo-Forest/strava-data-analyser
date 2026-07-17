@@ -321,6 +321,13 @@
     const performanceTrend = paceImprovementPct;
 
     const trainingBalance = analyzeTrainingBalance(sortedActivities, easyPace);
+    const paceCollapse = Math.max(0, Math.min(20, Math.round(
+      Math.max(0, (
+        (recentRuns[1] ? (getActivityPace(recentRuns[1]) || 0) : 0)
+        - (recentRuns[0] ? (getActivityPace(recentRuns[0]) || 0) : 0)
+      ) / Math.max(1, recentRuns[0] ? getActivityPace(recentRuns[0]) : 1) * 100)
+    )));
+
     const metrics = {
       acwr,
       dist7d,
@@ -328,7 +335,7 @@
       restDays,
       daysSinceLastRun,
       daysSinceLastHardWorkout,
-      paceCollapse: Math.max(0, Math.min(20, Math.round(Math.max(0, ((recentRuns[1] ? (getActivityPace(recentRuns[1]) || 0) : 0) - (recentRuns[0] ? (getActivityPace(recentRuns[0]) || 0) : 0)) / Math.max(1, recentRuns[0] ? getActivityPace(recentRuns[0]) : 1) * 100))))),
+      paceCollapse,
       performanceTrend
     };
 
