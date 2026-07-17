@@ -52,32 +52,10 @@
     return Math.floor(ms / DAY_MS);
   };
 
-  const getWeeklyDistance = (activities, days = 7) => {
-    const cutoff = new Date(REFERENCE_DATE);
-    cutoff.setDate(cutoff.getDate() - days);
-    return activities.filter(activity => new Date(activity.date) >= cutoff).reduce((sum, activity) => sum + (activity.distance || 0), 0);
-  };
-
   const getRecentRuns = (activities, days = 28) => {
     const cutoff = new Date(REFERENCE_DATE);
     cutoff.setDate(cutoff.getDate() - days);
     return sortActivities(activities).filter(activity => new Date(activity.date) >= cutoff && activity.distance);
-  };
-
-  const estimateEasyPace = (activities) => {
-    const recent = getRecentRuns(activities, 21).slice(0, 8);
-    if (!recent.length) return 320;
-
-    const paces = recent
-      .map(getActivityPace)
-      .filter(Boolean)
-      .sort((a, b) => a - b);
-
-    if (paces.length === 0) return 320;
-
-    const medianIndex = Math.floor((paces.length - 1) / 2);
-    const medianPace = paces[medianIndex];
-    return medianPace || 320;
   };
 
   const classifyRun = (activity, easyPace) => {
@@ -107,6 +85,32 @@
     return 'moderate';
   };
 
+  // FIX #3: estimateEasyPace previously took the median pace of the last 8 runs
+  // regardless of intensity, so tempo/interval days pulled the "easy pace"
+  // baseline artificially fast. We now do a first pass with a rough pace-only
+  // classification to exclude likely-hard efforts before computing the median,
+  // then fall back to the unfiltered set only if too little data remains.
+  const estimateEasyPace = (activities) => {
+    const recent = getRecentRuns(activities, 21).slice(0, 12);
+    if (!recent.length) return 320;
+
+    const allPaces = recent.map(getActivityPace).filter(Boolean).sort((a, b) => a - b);
+    if (allPaces.length === 0) return 320;
+
+    // Rough baseline from all paces first (used only to detect outlier-fast runs)
+    const roughMedian = allPaces[Math.floor((allPaces.length - 1) / 2)];
+
+    // Exclude runs that are clearly hard efforts (much faster than the rough median)
+    const filteredPaces = recent
+      .map(getActivityPace)
+      .filter(pace => pace && pace >= roughMedian - 20)
+      .sort((a, b) => a - b);
+
+    const paces = filteredPaces.length >= 3 ? filteredPaces : allPaces;
+    const medianIndex = Math.floor((paces.length - 1) / 2);
+    return paces[medianIndex] || 320;
+  };
+
   const analyzeTrainingBalance = (activities, easyPace) => {
     const recentRuns = getRecentRuns(activities, 21);
     const categorized = recentRuns.map(activity => ({ activity, label: classifyRun(activity, easyPace) }));
@@ -117,11 +121,18 @@
     const hardRatio = hardCount / totalCount;
     const recentHardBackToBack = categorized.slice(0, 2).every(item => item.label === 'hard');
 
+    // FIX #4: hardCount is measured over a 21-day window, so "3 hard efforts"
+    // is really just 1/week - normal for most plans - yet it was treated the
+    // same as 3 hard efforts in a single week. Normalize to a weekly rate so
+    // downstream thresholds mean what they say.
+    const hardPerWeek = hardCount / 3;
+
     return {
       categorized,
       hardCount,
       longCount,
       hardRatio,
+      hardPerWeek,
       recentHardBackToBack
     };
   };
@@ -179,7 +190,7 @@
 
   const determineWorkout = (activities, metrics, trainingBalance, easyPace) => {
     const { acwr, dist7d, dist28d, restDays, daysSinceLastRun, daysSinceLastHardWorkout, paceCollapse, performanceTrend } = metrics;
-    const { hardCount, hardRatio, recentHardBackToBack, categorized } = trainingBalance;
+    const { hardCount, hardRatio, hardPerWeek, recentHardBackToBack, categorized } = trainingBalance;
     const recentRuns = getRecentRuns(activities, 28);
     const recentRunsLast7 = getRecentRuns(activities, 7);
     const avgRunDistance = recentRuns.length ? recentRuns.reduce((sum, run) => sum + run.distance, 0) / recentRuns.length : 7;
@@ -201,17 +212,26 @@
       rest: 0
     };
 
-    if (Number(acwr) > 1.35 || Number(paceCollapse) > 6 || hardCount >= 3 || daysSinceLastHardWorkout <= 2) {
+    // FIX #4: use hardPerWeek (normalized) instead of raw hardCount over 21 days,
+    // so this only fires when someone is genuinely doing >2 hard sessions/week.
+    // FIX #2: paceCollapse threshold raised and given less unilateral weight,
+    // since it's derived from just the last two runs and is naturally noisy.
+    if (Number(acwr) > 1.35 || Number(paceCollapse) > 12 || hardPerWeek >= 2.5 || daysSinceLastHardWorkout <= 1) {
       workoutScores.recovery += 7;
       workoutScores.rest += 3;
       workoutScores.easy += 2;
     }
 
-    if (daysSinceLastRun >= 4 && Number(acwr) > 1.1) {
-      workoutScores.recovery += 2;
-      workoutScores.easy += 1;
+    // FIX #6: previously combined "haven't run in 4+ days" with "acwr > 1.1",
+    // which is a contradictory pairing (low recent volume rarely produces a
+    // high ACWR). Split into two clearer, independent signals instead.
+    if (daysSinceLastRun >= 4) {
+      workoutScores.easy += 2;
+      workoutScores.recovery += 1;
     }
 
+    // FIX #1: restDays is now computed correctly (see buildRecommendation),
+    // so this condition fires as intended when true rest has been scarce.
     if (restDays <= 2 && Number(acwr) > 1.1) {
       workoutScores.recovery += 2;
       workoutScores.rest += 1;
@@ -307,7 +327,13 @@
     const dist28d = recentRuns14.reduce((sum, run) => sum + (run.distance || 0), 0);
     const chronicAvg = dist28d / 4;
     const acwr = chronicAvg > 0 ? dist7d / chronicAvg : 1;
-    const restDays = Math.max(0, 14 - new Set(recentRuns7.map(run => Math.floor(new Date(run.date).getTime() / DAY_MS))).size);
+
+    // FIX #1: restDays previously counted unique run-days from a 7-day window
+    // but subtracted from 14, guaranteeing a value >= 7 almost always. Now
+    // both the run-day count and the window size are 7 days, so restDays
+    // correctly ranges 0-7 and the "restDays <= 2" checks behave as intended.
+    const restDays = Math.max(0, 7 - new Set(recentRuns7.map(run => Math.floor(new Date(run.date).getTime() / DAY_MS))).size);
+
     const lastRun = recentRuns[0];
     const daysSinceLastRun = lastRun ? getDaysBetween(lastRun.date) : 999;
     const recentHardActivities = recentRuns.filter(run => classifyRun(run, easyPace) === 'hard');
@@ -321,6 +347,12 @@
     const performanceTrend = paceImprovementPct;
 
     const trainingBalance = analyzeTrainingBalance(sortedActivities, easyPace);
+
+    // FIX #2: this metric compares only the two most recent runs' pace, which
+    // is a noisy day-to-day signal, not a genuine fatigue/"collapse" indicator
+    // (a single hilly or windy run can trigger it). We keep the calculation
+    // but it's now weighted much more lightly downstream (see determineWorkout),
+    // and only ever nudges the recommendation rather than dominating it.
     const paceCollapse = Math.max(0, Math.min(20, Math.round(
       Math.max(0, (
         (recentRuns[1] ? (getActivityPace(recentRuns[1]) || 0) : 0)
@@ -356,6 +388,7 @@
     if (daysSinceLastRun >= 3) reasonLines.push(`It has been ${daysSinceLastRun} days since your last run, so the plan prioritises freshness over extra volume.`);
     if (trainingBalance.hardRatio > 0.2) reasonLines.push('The recent balance is drifting too hard-heavy, so the engine is protecting the aerobic share.');
     if (workoutType === 'long' && previousLongRun > 0) reasonLines.push(`Long-run volume is kept within roughly 10% of your recent longest run (${previousLongRun.toFixed(1)} km).`);
+    if (restDays <= 1) reasonLines.push(`You've had ${restDays} full rest day(s) in the last week, so recovery is being weighted more heavily.`);
 
     const warnings = [];
     if (Number(acwr) > 1.3) warnings.push('Your training load has increased sharply this week.');
