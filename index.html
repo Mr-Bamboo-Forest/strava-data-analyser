@@ -47,8 +47,10 @@
             <option value="365">Last 365 Days</option>
             <option value="all">All Time</option>
           </select>
-          <input type="file" id="import-file" accept=".gpx,.json" class="sr-only" webkitdirectory directory multiple>
-          <button id="btn-import" class="btn btn-secondary">Import GPX Folder</button>
+          <input type="file" id="import-csv-file" accept=".csv" class="sr-only">
+          <input type="file" id="import-gpx-folder" accept=".gpx" class="sr-only" multiple webkitdirectory directory>
+          <button id="btn-import-csv" class="btn btn-secondary" title="Select your activities.csv file from the Strava bulk export">Import CSV</button>
+          <button id="btn-import-gpx" class="btn btn-secondary" title="Select your GPX activities folder from the Strava bulk export">Import GPX Folder</button>
           <button id="btn-export" class="btn btn-outline">Export</button>
         </div>
       </header>
@@ -381,9 +383,14 @@
             </div>
 
             <div class="panel-card">
-              <h3>GPX Folder Import</h3>
-              <p class="section-desc">Choose a folder exported from Strava that contains .gpx activity files. Each file becomes one activity in the dashboard.</p>
-              <p class="save-feedback">Use the Import GPX Folder button in the header to select your folder.</p>
+              <h3>Importing Your Strava Data</h3>
+              <p class="section-desc">Use the two buttons in the header: <strong>Import CSV</strong> for your <code>activities.csv</code> file, and <strong>Import GPX Folder</strong> for your <code>activities</code> folder of .gpx files. Use either one on its own, or both - once both have been selected they're automatically matched up (by activity ID, then by start time) into one activity list. The CSV supplies accurate distance/time for every activity, including treadmill and other indoor sessions that .gpx files can't capture (no GPS movement = no distance).</p>
+              <p class="section-desc">Selecting a new CSV or GPX folder re-matches against whichever one you selected most recently in this session, so you can add the second one at any point to upgrade a single-source import.</p>
+              <div class="form-group">
+                <input type="file" id="import-json-file" accept=".json" class="sr-only">
+                <button id="btn-import-json" class="btn btn-outline">Restore from JSON Backup</button>
+                <small>Only needed if you're restoring a previous Export from this dashboard.</small>
+              </div>
             </div>
 
             <div class="panel-card">

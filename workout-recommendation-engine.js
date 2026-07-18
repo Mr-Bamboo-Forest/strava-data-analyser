@@ -63,15 +63,11 @@
     const name = `${activity.name || ''} ${activity.type || ''}`.toLowerCase();
     const pace = getActivityPace(activity);
 
-    if (/(tempo|threshold|interval|race|hard|quality)/.test(name)) {
-      if (/(interval)/.test(name)) return 'hard';
-      if (/(threshold)/.test(name)) return 'hard';
-      if (/(tempo|race)/.test(name)) return 'hard';
+    if (/(tempo|threshold|interval|race|hard|quality|fartlek|hill repeat|workout)/.test(name)) {
       return 'hard';
     }
 
-    if (/(recovery|easy|base|steady|aerobic|jog)/.test(name)) {
-      if (/(recovery)/.test(name)) return 'easy';
+    if (/(recovery|easy|base|steady|aerobic|jog|shakeout)/.test(name)) {
       return 'easy';
     }
 

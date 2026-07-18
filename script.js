@@ -95,7 +95,7 @@ const normalizeActivityType = (value) => {
   if (['ride', 'bike', 'cycling', 'biking', 'virtualride', 'ebikeride', 'gravelride', 'roadride', 'mountainbike'].some(token => normalized.includes(token))) {
     return 'Bike';
   }
-  if (['run', 'trailrun', 'virtualrun', 'jog', 'race'].some(token => normalized.includes(token))) {
+  if (['run', 'trailrun', 'virtualrun', 'jog', 'race', 'treadmill'].some(token => normalized.includes(token))) {
     return 'Run';
   }
   if (['swim', 'swimming', 'openwaterswim', 'lapswim'].some(token => normalized.includes(token))) {
@@ -118,6 +118,94 @@ const sanitizeActivity = (activity) => {
   }
 
   return activity;
+};
+
+const haversineMeters = (a, b) => {
+  const toRad = (value) => value * Math.PI / 180;
+  const earthRadius = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLon = Math.sin(dLon / 2);
+  const h = sinLat ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * sinLon ** 2;
+  return 2 * earthRadius * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+};
+
+// Builds 1km splits (pace + elevation per km) from raw GPX trackpoints, by
+// walking the track and interpolating the exact time/elevation at each
+// 1000m boundary. This is what previously never ran - both import paths
+// hardcoded splits_metric to [], so "Kilometre Splits" and "Classification"
+// always showed as empty/N/A regardless of whether GPS data existed.
+// Requires timestamps on the points (GPX files without <time> can't yield
+// a pace-over-distance curve); returns [] rather than guessing in that case.
+const SPLIT_METERS = 1000;
+const buildKmSplitsFromPoints = (points) => {
+  if (!points || points.length < 2 || !points[0].time) return [];
+
+  const splits = [];
+  let splitIndex = 1;
+  let splitStartDist = 0;
+  let splitStartTime = points[0].time;
+  let splitStartEle = points[0].ele;
+  let cumDist = 0;
+  let nextThreshold = SPLIT_METERS;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const segDist = haversineMeters(prev, curr);
+    if (segDist <= 0) continue;
+
+    const segStartCum = cumDist;
+    const segEndCum = cumDist + segDist;
+    const hasTime = !!(prev.time && curr.time);
+
+    // A single GPS segment can straddle more than one km boundary if the
+    // recording interval is sparse, so loop rather than assume one crossing.
+    while (nextThreshold <= segEndCum) {
+      const fraction = (nextThreshold - segStartCum) / segDist;
+      const crossTime = hasTime
+        ? new Date(prev.time.getTime() + fraction * (curr.time.getTime() - prev.time.getTime()))
+        : null;
+      const crossEle = prev.ele + fraction * (curr.ele - prev.ele);
+
+      splits.push({
+        split: splitIndex,
+        distance: Math.round(nextThreshold - splitStartDist),
+        moving_time: crossTime ? Math.max(1, Math.round((crossTime - splitStartTime) / 1000)) : null,
+        elevation_difference: Math.round((crossEle - splitStartEle) * 10) / 10
+      });
+
+      splitIndex += 1;
+      splitStartDist = nextThreshold;
+      if (crossTime) splitStartTime = crossTime;
+      splitStartEle = crossEle;
+      nextThreshold += SPLIT_METERS;
+    }
+
+    cumDist = segEndCum;
+  }
+
+  // Trailing partial km: fold short tails (<150m) into the last full split
+  // rather than rendering a misleading standalone "split" from 40m of data.
+  const lastPoint = points[points.length - 1];
+  const remainder = cumDist - splitStartDist;
+  if (remainder > 150) {
+    splits.push({
+      split: splitIndex,
+      distance: Math.round(remainder),
+      moving_time: lastPoint.time ? Math.max(1, Math.round((lastPoint.time - splitStartTime) / 1000)) : null,
+      elevation_difference: Math.round((lastPoint.ele - splitStartEle) * 10) / 10
+    });
+  } else if (remainder > 0 && splits.length) {
+    const last = splits[splits.length - 1];
+    last.distance += Math.round(remainder);
+    if (last.moving_time != null && lastPoint.time) {
+      last.moving_time += Math.max(0, Math.round((lastPoint.time - splitStartTime) / 1000));
+    }
+  }
+
+  return splits.filter(s => Number.isFinite(s.moving_time) && s.moving_time > 0 && s.distance > 0);
 };
 
 const parseGpxFile = async (file) => {
@@ -168,19 +256,17 @@ const parseGpxFile = async (file) => {
       }
     }
 
+    // NOTE: GPX tracks require real GPS movement to compute distance. Indoor
+    // activities (treadmill runs, etc.) typically export with zero or a single
+    // fixed-location point, so distance cannot be reliably derived here. Use
+    // the CSV import path (parseActivitiesCsvFile) for those instead, which
+    // reads Strava's own recorded distance/time rather than reconstructing it
+    // from GPS.
     if (!points.length) return null;
 
     let distanceMeters = 0;
     for (let i = 1; i < points.length; i += 1) {
-      const prev = points[i - 1];
-      const curr = points[i];
-      const toRad = (value) => value * Math.PI / 180;
-      const earthRadius = 6371000;
-      const dLat = toRad(curr.lat - prev.lat);
-      const dLon = toRad(curr.lon - prev.lon);
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(prev.lat)) * Math.cos(toRad(curr.lat)) * Math.sin(dLon / 2) ** 2;
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      distanceMeters += earthRadius * c;
+      distanceMeters += haversineMeters(points[i - 1], points[i]);
     }
 
     let elevationGain = 0;
@@ -212,12 +298,254 @@ const parseGpxFile = async (file) => {
       total_elevation_gain: Math.round(elevationGain),
       average_cadence: null,
       source: 'gpx',
-      splits_metric: []
+      hasGpsTrack: true,
+      splits_metric: buildKmSplitsFromPoints(points)
     });
   } catch (err) {
     console.warn('Skipping invalid GPX file:', file.name, err);
     return null;
   }
+};
+
+// --- CSV IMPORT (Strava "Export Data" activities.csv) ---
+// Strava's bulk-export CSV includes one row per activity with distance and
+// moving time already computed by Strava itself (from GPS OR footpod/
+// accelerometer data). Unlike per-activity GPX files, this works correctly
+// for indoor/treadmill activities, since it never depends on GPS movement.
+//
+// The export duplicates several column headers (Distance, Elapsed Time, Max
+// Heart Rate, Commute, Relative Effort each appear twice at different
+// precision/units). We therefore parse by fixed column index rather than by
+// header name to avoid silently reading the wrong column.
+const CSV_COLUMNS = {
+  ACTIVITY_ID: 0,
+  ACTIVITY_DATE: 1,
+  ACTIVITY_NAME: 2,
+  ACTIVITY_TYPE: 3,
+  ELAPSED_TIME_SEC: 15,   // detailed elapsed time (seconds)
+  MOVING_TIME_SEC: 16,    // moving time (seconds)
+  DISTANCE_METERS: 17,    // detailed distance (meters) - more precise than col 6 (km, rounded)
+  ELEVATION_GAIN_M: 20,
+  AVERAGE_CADENCE: 29
+};
+
+// Minimal RFC4180-style CSV row parser: handles quoted fields containing
+// commas, quotes, and newlines (Strava quotes fields like the date that
+// themselves contain commas, e.g. "Jul 12, 2026, 6:05:17 AM").
+const parseCsvRows = (text) => {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (char === '"' && next === '"') {
+        field += '"';
+        i += 1;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        field += char;
+      }
+    } else if (char === '"') {
+      inQuotes = true;
+    } else if (char === ',') {
+      row.push(field);
+      field = '';
+    } else if (char === '\n' || char === '\r') {
+      if (char === '\r' && next === '\n') i += 1;
+      row.push(field);
+      field = '';
+      if (row.length > 1 || row[0] !== '') rows.push(row);
+      row = [];
+    } else {
+      field += char;
+    }
+  }
+
+  if (field.length || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  return rows;
+};
+
+const parseActivitiesCsvFile = async (file) => {
+  const text = await file.text();
+  const rows = parseCsvRows(text);
+  if (rows.length < 2) return [];
+
+  const dataRows = rows.slice(1); // skip header row
+  const activities = [];
+
+  dataRows.forEach((cols, index) => {
+    if (!cols || cols.length < 20) return;
+
+    const rawType = cols[CSV_COLUMNS.ACTIVITY_TYPE];
+    const activityType = normalizeActivityType(rawType);
+    if (!activityType) return; // unsupported type (Walk, Snowboard, etc.) - same filter as GPX/JSON import
+
+    const rawDate = cols[CSV_COLUMNS.ACTIVITY_DATE];
+    const parsedDate = rawDate ? new Date(rawDate) : null;
+    if (!parsedDate || Number.isNaN(parsedDate.getTime())) return;
+
+    const distanceMeters = parseFloat(cols[CSV_COLUMNS.DISTANCE_METERS]);
+    const movingTimeSec = parseFloat(cols[CSV_COLUMNS.MOVING_TIME_SEC]);
+    const elapsedTimeSec = parseFloat(cols[CSV_COLUMNS.ELAPSED_TIME_SEC]);
+
+    if (!Number.isFinite(distanceMeters) || !Number.isFinite(movingTimeSec) || movingTimeSec <= 0) return;
+
+    const elevationGain = parseFloat(cols[CSV_COLUMNS.ELEVATION_GAIN_M]);
+    const cadence = parseFloat(cols[CSV_COLUMNS.AVERAGE_CADENCE]);
+
+    const activityId = cols[CSV_COLUMNS.ACTIVITY_ID] || `csv-${Date.now()}-${index}`;
+    const name = cols[CSV_COLUMNS.ACTIVITY_NAME] || `${activityType} - ${Helpers.formatDate(parsedDate.toISOString())}`;
+
+    activities.push(sanitizeActivity({
+      id: `csv-${activityId}`,
+      name,
+      date: parsedDate.toISOString(),
+      type: activityType,
+      distance: Number((distanceMeters / 1000).toFixed(2)),
+      elapsed_time: Number.isFinite(elapsedTimeSec) && elapsedTimeSec > 0 ? elapsedTimeSec : movingTimeSec,
+      moving_time: movingTimeSec,
+      total_elevation_gain: Number.isFinite(elevationGain) ? Math.round(elevationGain) : 0,
+      average_cadence: Number.isFinite(cadence) ? cadence : null,
+      source: 'csv',
+      hasGpsTrack: false,
+      // Strava's activities.csv export has no per-km column, so this is only
+      // ever filled in if a matching GPX file is merged in afterwards - see
+      // mergeGpxAndCsvActivities, which attaches real splits from GPS data.
+      splits_metric: []
+    }));
+  });
+
+  return activities;
+};
+
+// --- COMBINED GPX + CSV IMPORT ---
+// Strava's bulk export gives you both an activities.csv (authoritative
+// distance/time for every activity, including treadmill/indoor ones with no
+// GPS) and an "activities" folder of per-activity .gpx files (GPS tracks,
+// but nothing usable for indoor activities). Importing only one loses
+// something: CSV-only drops route/GPS detail, GPX-only drops indoor
+// activities entirely. This merges both into a single activity list built
+// on the CSV rows (authoritative numbers) and tags which ones were
+// confirmed against a matching GPS track.
+//
+// Matching strategy, in order:
+//   1. Filename match - Strava's exported .gpx files are named after the
+//      numeric activity ID (e.g. "9876543210.gpx"), which is also column 0
+//      of activities.csv. This is exact when it works.
+//   2. Fallback match - for any .gpx file that doesn't resolve by filename
+//      (e.g. renamed files), match to the closest still-unmatched CSV row
+//      of the same activity type within a 30-minute start-time window.
+// GPX files that still can't be matched are kept as their own GPX-derived
+// activity rather than silently dropped, since that likely means the CSV
+// file is incomplete/out of date relative to the GPX folder.
+const extractActivityIdFromFilename = (filename) => {
+  const match = filename.match(/(\d{6,})/); // Strava activity IDs: long numeric strings
+  return match ? match[1] : null;
+};
+
+const mergeGpxAndCsvActivities = async (gpxFiles, csvFile) => {
+  const csvActivities = await parseActivitiesCsvFile(csvFile);
+
+  const csvById = new Map();
+  csvActivities.forEach(activity => {
+    const rawId = activity.id.replace(/^csv-/, '');
+    if (rawId) csvById.set(rawId, activity);
+  });
+
+  const matchedCsvIds = new Set();
+  const unmatchedGpxFiles = [];
+  let filenameMatchCount = 0;
+
+  // Pass 1: exact filename -> Activity ID match
+  for (const file of gpxFiles) {
+    const fileId = extractActivityIdFromFilename(file.name);
+    const match = fileId ? csvById.get(fileId) : null;
+    if (match && !matchedCsvIds.has(match.id)) {
+      matchedCsvIds.add(match.id);
+      match.source = 'csv+gpx';
+      match.hasGpsTrack = true;
+      filenameMatchCount += 1;
+
+      // Attach real per-km splits from the GPS track onto the CSV row (CSV
+      // stays authoritative for total distance/time, GPX only supplies the
+      // split-level detail it has that the CSV export doesn't).
+      try {
+        const parsed = await parseGpxFile(file);
+        if (parsed && parsed.splits_metric && parsed.splits_metric.length) {
+          match.splits_metric = parsed.splits_metric;
+        }
+      } catch (err) {
+        console.warn('Matched GPX file failed to parse for split data:', file.name, err);
+      }
+    } else {
+      unmatchedGpxFiles.push(file);
+    }
+  }
+
+  // Pass 2: nearest same-type start-time match, within a 30 minute window
+  const TOLERANCE_MS = 30 * 60 * 1000;
+  let proximityMatchCount = 0;
+  const unresolvedGpxActivities = [];
+
+  for (const file of unmatchedGpxFiles) {
+    let parsed;
+    try {
+      parsed = await parseGpxFile(file);
+    } catch (err) {
+      console.warn('Skipping file during GPX import:', file.name, err);
+      continue;
+    }
+    if (!parsed) continue;
+
+    let best = null;
+    let bestDelta = Infinity;
+    csvActivities.forEach(csvAct => {
+      if (matchedCsvIds.has(csvAct.id)) return;
+      if (csvAct.type !== parsed.type) return;
+      const delta = Math.abs(new Date(csvAct.date) - new Date(parsed.date));
+      if (delta < bestDelta) { bestDelta = delta; best = csvAct; }
+    });
+
+    if (best && bestDelta <= TOLERANCE_MS) {
+      matchedCsvIds.add(best.id);
+      best.source = 'csv+gpx';
+      best.hasGpsTrack = true;
+      if (parsed.splits_metric && parsed.splits_metric.length) {
+        best.splits_metric = parsed.splits_metric;
+      }
+      proximityMatchCount += 1;
+    } else {
+      // No CSV counterpart found for this GPX file - keep it rather than
+      // silently drop a recorded activity (e.g. CSV export predates the GPX
+      // folder, or a file was renamed beyond ID recovery).
+      unresolvedGpxActivities.push(parsed);
+    }
+  }
+
+  const merged = [...csvActivities, ...unresolvedGpxActivities];
+
+  return {
+    merged,
+    stats: {
+      totalCsv: csvActivities.length,
+      totalGpx: gpxFiles.length,
+      filenameMatches: filenameMatchCount,
+      proximityMatches: proximityMatchCount,
+      gpsMatchedCount: matchedCsvIds.size,
+      csvOnlyCount: csvActivities.length - matchedCsvIds.size,
+      unresolvedGpxCount: unresolvedGpxActivities.length
+    }
+  };
 };
 
 // --- CORE ANALYTICAL ENGINE ---
@@ -1074,7 +1402,10 @@ const Render = {
     const pace = act.moving_time / act.distance;
     const collapse = Analytics.analyzePaceCollapse(act, AppState.settings.collapseSensitivity);
 
-    let splitsHtml = '<p class="text-muted">No split data available for this activity.</p>';
+    const noSplitsReason = act.hasGpsTrack === false
+      ? 'No GPS track for this activity (CSV-only import, e.g. treadmill). Import the matching GPX file to see per-km splits and pacing analysis.'
+      : 'GPS track has no usable timestamps or is too short to compute reliable per-km splits.';
+    let splitsHtml = `<p class="text-muted">${noSplitsReason}</p>`;
     if (act.splits_metric && act.splits_metric.length > 0) {
       splitsHtml = `
         <table class="split-table">
@@ -1103,7 +1434,7 @@ const Render = {
 
       <div class="panel-card" style="margin-bottom:0; background:var(--bg-card-alt);">
         <h4>Pace-Collapse & Strategy Analysis</h4>
-        <p style="font-size:0.875rem; margin-top:4px;"><strong>Classification:</strong> ${collapse.valid ? collapse.classification : 'N/A'}</p>
+        <p style="font-size:0.875rem; margin-top:4px;"><strong>Classification:</strong> ${collapse.valid ? collapse.classification : `N/A - ${noSplitsReason}`}</p>
         ${collapse.valid && collapse.collapseKm ? `<p style="font-size:0.875rem; color:var(--danger); margin-top:4px;">⚠️ Consistent pace deterioration detected starting at <strong>km ${collapse.collapseKm}</strong>.</p>` : ''}
         ${collapse.valid && collapse.startedTooFast ? `<p style="font-size:0.875rem; margin-top:4px;">💡 You opened faster than your sustainable pacing threshold. Suggested opening pace for next similar run: <strong>${Helpers.formatPace(collapse.suggestedOpeningPace)}</strong>.</p>` : ''}
       </div>
@@ -1165,20 +1496,59 @@ document.addEventListener('DOMContentLoaded', () => {
     Render.updateAll();
   });
 
-  // GPX / JSON Import Handlers
-  document.getElementById('btn-import').addEventListener('click', () => {
-    document.getElementById('import-file').click();
-  });
+  // --- Import Handlers ---
+  // CSV and GPX are separate pickers (a single <input> can't require "one
+  // file" and "a whole folder" at the same time). Each picker's file(s) are
+  // held here for the session; whichever was picked most recently is
+  // combined with whatever's already held for the other, so importing CSV
+  // then GPX (or vice versa, in either order) auto-merges them, while
+  // importing just one still works standalone.
+  const pendingImport = { csvFile: null, gpxFiles: null };
 
-  document.getElementById('import-file').addEventListener('change', async (e) => {
-    const files = Array.from(e.target.files || []);
-    if (!files.length) return;
-
-    const gpxFiles = files.filter(file => file.name.toLowerCase().endsWith('.gpx'));
-    const jsonFiles = files.filter(file => file.name.toLowerCase().endsWith('.json'));
+  const runImport = async () => {
+    const { csvFile, gpxFiles } = pendingImport;
 
     try {
-      if (gpxFiles.length) {
+      if (csvFile && gpxFiles && gpxFiles.length) {
+        // Combined path: activities.csv (authoritative distance/time, incl.
+        // indoor activities with no GPS) matched up against the GPX folder
+        // (GPS tracks for outdoor activities). See mergeGpxAndCsvActivities
+        // for the matching strategy.
+        const { merged, stats } = await mergeGpxAndCsvActivities(gpxFiles, csvFile);
+
+        if (!merged.length) {
+          alert('No supported activities (Run, Ride, Swim) were found across the CSV and GPX files.');
+          return;
+        }
+
+        const sorted = merged.sort((a, b) => new Date(b.date) - new Date(a.date));
+        AppState.activities = sorted;
+        localStorage.setItem('analyser_activities', JSON.stringify(sorted));
+        Render.updateAll();
+        alert(
+          `Successfully imported ${sorted.length} activit${sorted.length === 1 ? 'y' : 'ies'}.\n` +
+          `${stats.gpsMatchedCount} matched with a GPS track (${stats.filenameMatches} by filename, ${stats.proximityMatches} by start time).\n` +
+          `${stats.csvOnlyCount} from the CSV only (e.g. treadmill/indoor).` +
+          (stats.unresolvedGpxCount ? `\n${stats.unresolvedGpxCount} GPX file(s) had no matching CSV row and were added separately - check your CSV export is up to date.` : '')
+        );
+      } else if (csvFile) {
+        // Preferred single-source path: Strava's bulk-export activities.csv.
+        // Distance/time come from Strava's own recorded values (not GPS
+        // reconstruction), so this correctly includes treadmill and other
+        // indoor activities.
+        const imported = await parseActivitiesCsvFile(csvFile);
+
+        if (!imported.length) {
+          alert('No supported activities (Run, Ride, Swim) were found in the CSV file.');
+          return;
+        }
+
+        const sorted = imported.sort((a, b) => new Date(b.date) - new Date(a.date));
+        AppState.activities = sorted;
+        localStorage.setItem('analyser_activities', JSON.stringify(sorted));
+        Render.updateAll();
+        alert(`Successfully imported ${sorted.length} activit${sorted.length === 1 ? 'y' : 'ies'} from activities.csv. Tip: also use Import GPX Folder to match up GPS tracks.`);
+      } else if (gpxFiles && gpxFiles.length) {
         const parsedActivities = [];
         for (const file of gpxFiles) {
           try {
@@ -1191,7 +1561,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const supportedActivities = parsedActivities.filter(activity => ['Bike', 'Run', 'Swim'].includes(activity.type));
         if (!supportedActivities.length) {
-          alert('No valid Bike, Run, or Swim activities were found in the selected folder.');
+          alert('No valid Bike, Run, or Swim activities were found in the selected folder. Note: indoor/treadmill activities usually have no GPS track in GPX exports - use Import CSV for those instead.');
           return;
         }
 
@@ -1199,37 +1569,77 @@ document.addEventListener('DOMContentLoaded', () => {
         AppState.activities = imported;
         localStorage.setItem('analyser_activities', JSON.stringify(imported));
         Render.updateAll();
-        alert(`Successfully imported ${imported.length} activity${imported.length === 1 ? '' : 'ies'} from GPX files.`);
-      } else if (jsonFiles.length) {
-        const file = jsonFiles[0];
-        const text = await file.text();
-        const imported = JSON.parse(text);
-        if (Array.isArray(imported)) {
-          const supportedActivities = imported.filter(activity => {
-            const sanitizedActivity = sanitizeActivity(activity);
-            const typeValue = normalizeActivityType(sanitizedActivity?.type || sanitizedActivity?.sport_type || sanitizedActivity?.activity_type || sanitizedActivity?.name || '');
-            if (typeValue) {
-              sanitizedActivity.type = typeValue;
-              return true;
-            }
-            return false;
-          });
-
-          AppState.activities = supportedActivities;
-          localStorage.setItem('analyser_activities', JSON.stringify(supportedActivities));
-          Render.updateAll();
-          alert('Successfully imported activities from JSON file.');
-        } else {
-          alert('Invalid file format. Expected a JSON array of activities.');
-        }
-      } else {
-        alert('Please select a folder containing .gpx files or a .json activity export.');
+        alert(`Successfully imported ${imported.length} activity${imported.length === 1 ? '' : 'ies'} from GPX files. Tip: also use Import CSV - it captures treadmill/indoor activities that GPX files can't.`);
       }
     } catch (err) {
       console.error(err);
-      alert('Unable to import the selected files. Please make sure the folder contains valid GPX files.');
-    } finally {
-      e.target.value = '';
+      alert('Unable to import the selected file(s). Please make sure the file is a valid Strava export.');
+    }
+  };
+
+  document.getElementById('btn-import-csv').addEventListener('click', () => {
+    document.getElementById('import-csv-file').click();
+  });
+  document.getElementById('import-csv-file').addEventListener('change', async (e) => {
+    const file = (e.target.files || [])[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      alert('Please select a .csv file (your Strava activities.csv export).');
+      return;
+    }
+    pendingImport.csvFile = file;
+    await runImport();
+  });
+
+  document.getElementById('btn-import-gpx').addEventListener('click', () => {
+    document.getElementById('import-gpx-folder').click();
+  });
+  document.getElementById('import-gpx-folder').addEventListener('change', async (e) => {
+    const files = Array.from(e.target.files || []).filter(file => file.name.toLowerCase().endsWith('.gpx'));
+    e.target.value = '';
+    if (!files.length) {
+      alert('No .gpx files were found in the selected folder.');
+      return;
+    }
+    pendingImport.gpxFiles = files;
+    await runImport();
+  });
+
+  // JSON backup restore (Settings panel - only needed to restore a previous
+  // Export from this dashboard, so it's kept out of the main header).
+  document.getElementById('btn-import-json')?.addEventListener('click', () => {
+    document.getElementById('import-json-file').click();
+  });
+  document.getElementById('import-json-file')?.addEventListener('change', async (e) => {
+    const file = (e.target.files || [])[0];
+    e.target.value = '';
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const imported = JSON.parse(text);
+      if (Array.isArray(imported)) {
+        const supportedActivities = imported.filter(activity => {
+          const sanitizedActivity = sanitizeActivity(activity);
+          const typeValue = normalizeActivityType(sanitizedActivity?.type || sanitizedActivity?.sport_type || sanitizedActivity?.activity_type || sanitizedActivity?.name || '');
+          if (typeValue) {
+            sanitizedActivity.type = typeValue;
+            return true;
+          }
+          return false;
+        });
+
+        AppState.activities = supportedActivities;
+        localStorage.setItem('analyser_activities', JSON.stringify(supportedActivities));
+        Render.updateAll();
+        alert('Successfully imported activities from JSON file.');
+      } else {
+        alert('Invalid file format. Expected a JSON array of activities.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Unable to import the selected file. Please make sure it is a valid JSON export from this dashboard.');
     }
   });
 
