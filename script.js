@@ -63,6 +63,18 @@ const Helpers = {
       AppState.charts[chartId].destroy();
       delete AppState.charts[chartId];
     }
+  },
+
+  hexToRgba: (hex, alpha = 1) => {
+    if (!hex) return `rgba(255, 255, 255, ${alpha})`;
+    let c = hex.replace('#', '');
+    if (c.length === 3) c = c.split('').map(ch => ch + ch).join('');
+    const num = parseInt(c, 16);
+    if (Number.isNaN(num)) return `rgba(255, 255, 255, ${alpha})`;
+    const r = (num >> 16) & 255;
+    const g = (num >> 8) & 255;
+    const b = num & 255;
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
   }
 };
 
@@ -650,6 +662,89 @@ const Analytics = {
   },
 
   /**
+   * Returns the Monday 00:00:00 (local time) that starts the calendar
+   * week containing `date`.
+   */
+  getWeekStart: (date) => {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    const day = d.getDay(); // 0 = Sun, 1 = Mon, ... 6 = Sat
+    const diffToMonday = day === 0 ? 6 : day - 1;
+    d.setDate(d.getDate() - diffToMonday);
+    return d;
+  },
+
+  /**
+   * Current Weekly Streak: number of consecutive calendar weeks
+   * (Mon-Sun) containing at least one activity, counting backward
+   * from the current week. If the current week has no activity yet
+   * (e.g. it's only Tuesday), that's not treated as a broken streak -
+   * we simply start counting from the most recent completed week.
+   */
+  calculateWeeklyStreak: (activities) => {
+    if (!activities || activities.length === 0) return 0;
+
+    const weekKeys = new Set(
+      activities.map(a => Analytics.getWeekStart(a.date).getTime())
+    );
+
+    const oneWeekMs = 7 * 86400000;
+    let cursor = Analytics.getWeekStart(new Date()).getTime();
+    let streak = 0;
+
+    if (weekKeys.has(cursor)) {
+      streak++;
+      cursor -= oneWeekMs;
+    } else {
+      // Current week may simply not have happened yet - check the
+      // previous (fully elapsed) week before declaring the streak over.
+      cursor -= oneWeekMs;
+    }
+
+    while (weekKeys.has(cursor)) {
+      streak++;
+      cursor -= oneWeekMs;
+    }
+
+    return streak;
+  },
+
+  /**
+   * Builds a GitHub-style consistency calendar: an array of the last
+   * `weeks` calendar weeks, each containing 7 days (Mon-Sun), with the
+   * total distance run and activity count for that day.
+   */
+  buildConsistencyCalendar: (activities, weeks = 12) => {
+    const dayMap = new Map(); // dateKey (yyyy-mm-dd, local) -> { distance, count }
+    activities.forEach(a => {
+      const d = new Date(a.date);
+      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      const entry = dayMap.get(key) || { distance: 0, count: 0 };
+      entry.distance += a.distance || 0;
+      entry.count += 1;
+      dayMap.set(key, entry);
+    });
+
+    const currentWeekStart = Analytics.getWeekStart(new Date());
+    const gridStart = new Date(currentWeekStart);
+    gridStart.setDate(gridStart.getDate() - (weeks - 1) * 7);
+
+    const result = [];
+    for (let w = 0; w < weeks; w++) {
+      const days = [];
+      for (let d = 0; d < 7; d++) {
+        const date = new Date(gridStart);
+        date.setDate(date.getDate() + w * 7 + d);
+        const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+        const entry = dayMap.get(key) || { distance: 0, count: 0 };
+        days.push({ date, distance: entry.distance, count: entry.count });
+      }
+      result.push(days);
+    }
+    return result;
+  },
+
+  /**
    * Riegel Race Time Predictions: T2 = T1 * (D2 / D1)^1.06
    */
   summarizeOverview: (activities) => {
@@ -924,7 +1019,8 @@ const Render = {
     document.getElementById('stat-week-runs').textContent = hasData ? weekActs.length : '--';
     document.getElementById('stat-week-time').textContent = hasData ? Helpers.formatTime(weekTime) : '--';
     document.getElementById('stat-week-elev').textContent = hasData ? Helpers.formatDisplayValue(weekElev, { decimals: 0, suffix: ' m' }) : '--';
-    document.getElementById('stat-streak').textContent = '--';
+    const streakWeeks = hasData ? Analytics.calculateWeeklyStreak(acts) : 0;
+    document.getElementById('stat-streak').textContent = hasData ? `${streakWeeks} wk${streakWeeks === 1 ? '' : 's'}` : '--';
     document.getElementById('stat-avg-pace').textContent = hasData ? Helpers.formatPace(avgPace) : '--';
     document.getElementById('stat-longest-run').textContent = hasData ? Helpers.formatDisplayValue(longest, { decimals: 1, suffix: ' km' }) : '--';
 
@@ -995,6 +1091,37 @@ const Render = {
     heat.innerHTML = '';
     if (!acts.length) {
       heat.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);">--</div>';
+    } else {
+      const calendar = Analytics.buildConsistencyCalendar(acts, 12);
+      const maxDayDist = Math.max(1, ...calendar.flat().map(d => d.distance));
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      calendar.forEach(week => {
+        const col = document.createElement('div');
+        col.className = 'heat-col';
+
+        week.forEach(day => {
+          const cell = document.createElement('div');
+          cell.className = 'heat-cell';
+          const isFuture = day.date > today;
+
+          if (!isFuture && day.distance > 0) {
+            const ratio = day.distance / maxDayDist;
+            const level = ratio > 0.75 ? 4 : ratio > 0.5 ? 3 : ratio > 0.25 ? 2 : 1;
+            cell.classList.add(`level-${level}`);
+          }
+          if (isFuture) cell.style.visibility = 'hidden';
+
+          cell.title = isFuture
+            ? ''
+            : `${Helpers.formatDate(day.date.toISOString())}: ${day.count} run${day.count === 1 ? '' : 's'}, ${day.distance.toFixed(1)} km`;
+          col.appendChild(cell);
+        });
+
+        heat.appendChild(col);
+      });
     }
 
     Helpers.destroyChart('chart-overview-weekly');
